@@ -34,7 +34,11 @@
         inherit system;
       };
 
-      allKernels = with builtins; map (k: getAttr k self.packages.${system}) (attrNames self.packages.${system});
+      kernelResolver = import ./nix/kernel-version-resolver.nix {
+        inherit pkgs;
+        lib = nixpkgs.lib;
+        fetchFromGitHub = pkgs.fetchFromGitHub;
+      };
 
       devShell = pkgs.mkShell {
         name = "devShell";
@@ -50,29 +54,32 @@
         default = devShell;
       };
 
-      packages = {
-        # Default - tries latest, falls back to stable
-        wsl2-linux-kernel-with-zfs = pkgs.callPackage ./packages/wsl2-linux-kernel-with-zfs {
-          allowFallback = true;
-        };
-
-        # Latest kernel (may fail if incompatible)
-        wsl2-linux-kernel-with-zfs-latest = pkgs.callPackage ./packages/wsl2-linux-kernel-with-zfs {
-          preferredKernelTag = null; # Use latest available
-          allowFallback = false; # Fail fast if incompatible
-          requireStable = false;
-        };
-
-        # Stable kernel (always works)
-        wsl2-linux-kernel-with-zfs-stable = pkgs.callPackage ./packages/wsl2-linux-kernel-with-zfs {
-          preferredKernelTag = "linux-msft-wsl-6.6.36.6"; # Known working version
-          allowFallback = false;
-          requireStable = true;
-        };
-
-        # Base kernel builder (for other projects)
-        wsl2-linux-kernel-base = pkgs.callPackage ./packages/wsl2-linux-kernel-base {};
-      };
+      packages = builtins.listToAttrs (
+        builtins.concatMap (kernelInfo: [
+          # Base kernel package
+          {
+            name = "wsl2-linux-kernel-${nixpkgs.lib.strings.replaceStrings ["linux-msft-wsl-"] [""] kernelInfo.tag}-base";
+            value = (pkgs.callPackage ./packages/wsl2-linux-kernel-base {}).mkBaseKernel {
+              src = pkgs.fetchFromGitHub {
+                owner = "Microsoft";
+                repo = "WSL2-Linux-Kernel";
+                rev = kernelInfo.tag;
+                sha256 = kernelInfo.sha256;
+              };
+              version = nixpkgs.lib.strings.replaceStrings ["linux-msft-wsl-"] [""] kernelInfo.tag;
+              baseKernel = kernelResolver.zfsCompatibilityMatrix.${kernelInfo.majorMinor}.nixpkgsKernel or null;
+            };
+          }
+          # ZFS kernel package
+          {
+            name = "wsl2-linux-kernel-${nixpkgs.lib.strings.replaceStrings ["linux-msft-wsl-"] [""] kernelInfo.tag}-with-zfs";
+            value = pkgs.callPackage ./packages/wsl2-linux-kernel-with-zfs {
+              preferredKernelTag = kernelInfo.tag;
+              allowFallback = false; # We are explicitly building for this tag
+            };
+          }
+        ]) kernelResolver.knownWorkingKernels
+      );
       # for `nix fmt`
       formatter = (inputs.treefmt-nix.lib.evalModule pkgs ./nix/formatter.nix).config.build.wrapper;
       # for `nix flake check`
@@ -90,16 +97,5 @@
             inherit (nixpkgs) lib;
           };
         };
-    })
-    // {
-      overlays.default = final: _: {
-        inherit
-          (self.packages.${final.system})
-          wsl2-linux-kernel-base
-          wsl2-linux-kernel-with-zfs
-          wsl2-linux-kernel-with-zfs-latest
-          wsl2-linux-kernel-with-zfs-stable
-          ;
-      };
-    };
+    });
 }

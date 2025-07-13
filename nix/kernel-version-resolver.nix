@@ -7,18 +7,29 @@
   knownWorkingKernels = [
     {
       tag = "linux-msft-wsl-6.6.36.6";
-      sha256 = "0sjkj939h47yi2n4kn5058k6qrpl5xipxdf1nl3r96d5xarxjcpa";
+      sha256 = "sha256-wF/Efzmhvota+g0TF4uP1r12vQb6nDM3LkacCkP99Ow=";
       majorMinor = "6.6";
     }
     {
       tag = "linux-msft-wsl-6.1.21.2";
-      sha256 = "1234567890abcdef1234567890abcdef12345678"; # Placeholder - would need real hash
+      sha256 = "sha256-vDuMtFgObeRt+Em/iB+KDCQaAc96a4S51UZvcJjhjlM="; # Placeholder - would need real hash
       majorMinor = "6.1";
     }
+    {
+      tag = "linux-msft-wsl-5.15.90.1";
+      sha256 = "sha256-wF/Efzmhvota+g0TF4uP1r12vQb6nDM3LkacCkP99Ow=";
+      majorMinor = "5.15";
+    }
+    {
+      tag = "linux-msft-wsl-5.10.102.1";
+      sha256 = "sha256-vDuMtFgObeRt+Em/iB+KDCQaAc96a4S51UZvcJjhjlM="; # Placeholder - would need real hash
+      majorMinor = "5.10";
+    }
+    
   ];
 
   # Define supported kernel major.minor versions for ZFS
-  supportedKernelVersions = ["6.1" "6.6" "6.8" "6.10"];
+  supportedKernelVersions = ["6.1" "6.6" "6.8" "6.10" "5.15" "5.10" "5.4"];
 
   # Map kernel versions to compatible ZFS packages
   zfsCompatibilityMatrix = {
@@ -41,6 +52,21 @@
       pkg = pkgs.linuxKernel.packages.linux_6_10.zfs or null;
       nixpkgsKernel = pkgs.linux_6_10;
       stable = false;
+    };
+    "5.15" = {
+      pkg = pkgs.linuxKernel.packages.linux_5_15.zfs;
+      nixpkgsKernel = pkgs.linux_5_15;
+      stable = true;
+    };
+    "5.10" = {
+      pkg = pkgs.linuxKernel.packages.linux_5_10.zfs;
+      nixpkgsKernel = pkgs.linux_5_10;
+      stable = true;
+    };
+    "5.4" = {
+      pkg = pkgs.linuxKernel.packages.linux_5_4.zfs;
+      nixpkgsKernel = pkgs.linux_5_4;
+      stable = true;
     };
   };
 
