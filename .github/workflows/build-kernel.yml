@@ -578,7 +578,7 @@ jobs:
               releaseBody += `### Latest Kernel
             - **Version:** ${latestKernel}
             - **ZFS Version:** ${latestZfs}
-            - **Status:** ${{ needs.test-compatibility.outputs.latest-status === 'success' && '✅ Compatible' || '❌ Incompatible' }}
+            - **Status:** ${{ needs.test-compatibility.outputs.latest-status == 'success' && '✅ Compatible' || '❌ Incompatible' }}
             
             `;
             }
