@@ -1,0 +1,832 @@
+name: Build WSL2 Kernel with ZFS
+
+on:
+  schedule:
+    # Every 4 weeks on Mondays at 6 AM UTC (28 days)
+    - cron: '0 6 */28 * 1'
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    substituters = https://cache.nixos.org https://nix-community.cachix.org
+    trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+
+jobs:
+  check-new-releases:
+    name: Check for New Microsoft Releases
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    outputs:
+      has-new-release: ${{ steps.check-release.outputs.has-new-release }}
+      latest-release: ${{ steps.check-release.outputs.latest-release }}
+      current-stable: ${{ steps.check-release.outputs.current-stable }}
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for new Microsoft WSL2 kernel releases
+        id: check-release
+        run: |
+          echo "Checking for new Microsoft WSL2 kernel releases..."
+          
+          # Get latest release from Microsoft
+          latest_release=$(curl -s https://api.github.com/repos/Microsoft/WSL2-Linux-Kernel/releases/latest | jq -r '.tag_name')
+          echo "Latest Microsoft release: $latest_release"
+          
+          # Get our current stable version from the resolver
+          current_stable=$(grep -o 'linux-msft-wsl-[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+' nix/kernel-version-resolver.nix | head -1)
+          echo "Current stable: $current_stable"
+          
+          echo "latest-release=$latest_release" >> $GITHUB_OUTPUT
+          echo "current-stable=$current_stable" >> $GITHUB_OUTPUT
+          
+          # Check if we have a new release
+          if [ "$latest_release" != "$current_stable" ]; then
+            echo "has-new-release=true" >> $GITHUB_OUTPUT
+            echo "🆕 New release detected: $latest_release (current: $current_stable)"
+          else
+            echo "has-new-release=false" >> $GITHUB_OUTPUT
+            echo "✅ No new release, current version is up to date"
+          fi
+
+  test-compatibility:
+    name: Test Kernel/ZFS Compatibility
+    runs-on: ubuntu-latest
+    # Run if: manual trigger, push/PR, or if scheduled AND there's a new release
+    if: |
+      github.event_name != 'schedule' || 
+      (github.event_name == 'schedule' && needs.check-new-releases.outputs.has-new-release == 'true')
+    needs: check-new-releases
+    outputs:
+      latest-kernel: ${{ steps.check-latest.outputs.kernel-version }}
+      latest-zfs: ${{ steps.check-latest.outputs.zfs-version }}
+      latest-status: ${{ steps.check-latest.outputs.build-status }}
+      stable-kernel: ${{ steps.check-stable.outputs.kernel-version }}
+      stable-zfs: ${{ steps.check-stable.outputs.zfs-version }}
+      stable-status: ${{ steps.check-stable.outputs.build-status }}
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: nix-community
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Check latest kernel compatibility
+        id: check-latest
+        continue-on-error: true
+        run: |
+          echo "Testing latest kernel build..."
+          
+          # Try to evaluate the latest build
+          if nix eval --json '.#wsl2-linux-kernel-with-zfs-latest.meta' > latest-meta.json 2>/dev/null; then
+            kernel_version=$(jq -r '.kernel_version // "unknown"' latest-meta.json)
+            zfs_version=$(jq -r '.zfs_version // "unknown"' latest-meta.json)
+            
+            echo "kernel-version=$kernel_version" >> $GITHUB_OUTPUT
+            echo "zfs-version=$zfs_version" >> $GITHUB_OUTPUT
+            
+            # Test if build would succeed (dry run)
+            if nix build --dry-run '.#wsl2-linux-kernel-with-zfs-latest' 2>/dev/null; then
+              echo "build-status=success" >> $GITHUB_OUTPUT
+              echo "✅ Latest kernel $kernel_version with ZFS $zfs_version - Compatible"
+            else
+              echo "build-status=failure" >> $GITHUB_OUTPUT
+              echo "❌ Latest kernel $kernel_version with ZFS $zfs_version - Incompatible"
+            fi
+          else
+            echo "build-status=error" >> $GITHUB_OUTPUT
+            echo "kernel-version=unknown" >> $GITHUB_OUTPUT
+            echo "zfs-version=unknown" >> $GITHUB_OUTPUT
+            echo "❌ Failed to evaluate latest kernel package"
+          fi
+
+      - name: Check stable kernel compatibility
+        id: check-stable
+        run: |
+          echo "Testing stable kernel build..."
+          
+          # Test stable build (should always work)
+          nix eval --json '.#wsl2-linux-kernel-with-zfs-stable.meta' > stable-meta.json
+          
+          kernel_version=$(jq -r '.kernel_version // "unknown"' stable-meta.json)
+          zfs_version=$(jq -r '.zfs_version // "unknown"' stable-meta.json)
+          
+          echo "kernel-version=$kernel_version" >> $GITHUB_OUTPUT
+          echo "zfs-version=$zfs_version" >> $GITHUB_OUTPUT
+          
+          # Test if build would succeed (dry run)
+          if nix build --dry-run '.#wsl2-linux-kernel-with-zfs-stable' 2>/dev/null; then
+            echo "build-status=success" >> $GITHUB_OUTPUT
+            echo "✅ Stable kernel $kernel_version with ZFS $zfs_version - Compatible"
+          else
+            echo "build-status=failure" >> $GITHUB_OUTPUT
+            echo "❌ Stable kernel $kernel_version with ZFS $zfs_version - Incompatible"
+            exit 1  # Stable should never fail
+          fi
+
+      - name: Generate compatibility report
+        run: |
+          echo "# Kernel/ZFS Compatibility Report" > compatibility-report.md
+          echo "" >> compatibility-report.md
+          echo "Generated on: $(date -Iseconds)" >> compatibility-report.md
+          echo "" >> compatibility-report.md
+          
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "## Microsoft Release Check" >> compatibility-report.md
+            echo "- Latest Microsoft release: ${{ needs.check-new-releases.outputs.latest-release || 'N/A' }}" >> compatibility-report.md
+            echo "- Current stable version: ${{ needs.check-new-releases.outputs.current-stable || 'N/A' }}" >> compatibility-report.md
+            echo "- New release detected: ${{ needs.check-new-releases.outputs.has-new-release || 'N/A' }}" >> compatibility-report.md
+            echo "" >> compatibility-report.md
+          fi
+          
+          echo "## Latest Kernel Test" >> compatibility-report.md
+          echo "- Kernel: ${{ steps.check-latest.outputs.kernel-version }}" >> compatibility-report.md
+          echo "- ZFS: ${{ steps.check-latest.outputs.zfs-version }}" >> compatibility-report.md
+          echo "- Status: ${{ steps.check-latest.outputs.build-status }}" >> compatibility-report.md
+          echo "" >> compatibility-report.md
+          
+          echo "## Stable Kernel Test" >> compatibility-report.md
+          echo "- Kernel: ${{ steps.check-stable.outputs.kernel-version }}" >> compatibility-report.md
+          echo "- ZFS: ${{ steps.check-stable.outputs.zfs-version }}" >> compatibility-report.md
+          echo "- Status: ${{ steps.check-stable.outputs.build-status }}" >> compatibility-report.md
+          
+          cat compatibility-report.md
+
+      - name: Upload compatibility report
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-report
+          path: compatibility-report.md
+
+  build-stable:
+    name: Build Stable Kernel
+    runs-on: ubuntu-latest
+    needs: test-compatibility
+    if: needs.test-compatibility.outputs.stable-status == 'success'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: nix-community
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build stable kernel with ZFS
+        run: |
+          echo "Building stable WSL2 kernel with ZFS..."
+          nix build '.#wsl2-linux-kernel-with-zfs-stable' -L
+          
+          # Show build results
+          ls -la result/
+          ls -la result/lib/modules/ || true
+          
+          # Extract build info
+          if [ -f result/build-info.json ]; then
+            echo "Build Information:"
+            cat result/build-info.json | jq .
+          fi
+
+      - name: Test ZFS modules
+        run: |
+          echo "Testing ZFS module presence..."
+          
+          # Check bzImage
+          file result/bzImage-*
+          
+          # Check ZFS modules
+          find result/lib/modules -name "*.ko" -type f | head -10
+          
+          # Verify specific ZFS modules exist
+          modules=("zfs" "zcommon" "znvpair" "zavl" "icp" "spl")
+          for module in "${modules[@]}"; do
+            if find result/lib/modules -name "${module}.ko" -type f | grep -q .; then
+              echo "✅ Found ${module}.ko"
+            else
+              echo "❌ Missing ${module}.ko"
+              exit 1
+            fi
+          done
+
+      - name: Run compatibility tests
+        run: |
+          echo "Running compatibility tests..."
+          nix build '.#wsl2-linux-kernel-with-zfs-stable.tests.zfs-compatibility' -L
+          nix build '.#wsl2-linux-kernel-with-zfs-stable.tests.bzimage-format' -L
+          
+          echo "✅ All compatibility tests passed"
+
+      - name: Prepare artifacts for upload
+        run: |
+          echo "Preparing kernel artifacts..."
+          
+          # Create artifacts directory
+          mkdir -p artifacts
+          
+          # Copy and compress bzImage
+          cp result/bzImage-* artifacts/
+          gzip -9 artifacts/bzImage-*
+          
+          # Copy other artifacts
+          cp result/build-info.json artifacts/
+          cp result/etc/modules-load.d/zfs.conf artifacts/
+          
+          # Create checksums
+          cd artifacts
+          sha256sum * > checksums.sha256
+          
+          # Show what we're uploading
+          echo "Artifacts to upload:"
+          ls -la
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsl2-kernel-stable-${{ needs.test-compatibility.outputs.stable-kernel }}
+          path: artifacts/
+          compression-level: 0  # Don't compress again since bzImage is already gzipped
+
+  build-latest:
+    name: Build Latest Kernel
+    runs-on: ubuntu-latest
+    needs: test-compatibility
+    if: needs.test-compatibility.outputs.latest-status == 'success'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: nix-community
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build latest kernel with ZFS
+        run: |
+          echo "Building latest WSL2 kernel with ZFS..."
+          nix build '.#wsl2-linux-kernel-with-zfs-latest' -L
+          
+          # Show build results
+          ls -la result/
+          
+          # Extract build info
+          if [ -f result/build-info.json ]; then
+            echo "Build Information:"
+            cat result/build-info.json | jq .
+          fi
+
+      - name: Test ZFS modules
+        run: |
+          echo "Testing ZFS module presence..."
+          
+          # Check bzImage
+          file result/bzImage-*
+          
+          # Verify ZFS modules
+          modules=("zfs" "zcommon" "znvpair" "zavl" "icp" "spl")
+          for module in "${modules[@]}"; do
+            if find result/lib/modules -name "${module}.ko" -type f | grep -q .; then
+              echo "✅ Found ${module}.ko"
+            else
+              echo "❌ Missing ${module}.ko"
+              exit 1
+            fi
+          done
+
+      - name: Prepare artifacts for upload
+        run: |
+          echo "Preparing kernel artifacts..."
+          
+          # Create artifacts directory
+          mkdir -p artifacts
+          
+          # Copy and compress bzImage
+          cp result/bzImage-* artifacts/
+          gzip -9 artifacts/bzImage-*
+          
+          # Copy other artifacts
+          cp result/build-info.json artifacts/
+          cp result/etc/modules-load.d/zfs.conf artifacts/
+          
+          # Create checksums
+          cd artifacts
+          sha256sum * > checksums.sha256
+          
+          # Show what we're uploading
+          echo "Artifacts to upload:"
+          ls -la
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsl2-kernel-latest-${{ needs.test-compatibility.outputs.latest-kernel }}
+          path: artifacts/
+          compression-level: 0  # Don't compress again since bzImage is already gzipped
+
+  check-updates:
+    name: Check for Updates
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    needs: [check-new-releases, test-compatibility, build-stable]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for new kernel releases
+        run: |
+          echo "Checking Microsoft WSL2 kernel updates..."
+          
+          echo "Latest Microsoft release: ${{ needs.check-new-releases.outputs.latest-release }}"
+          echo "Current stable: ${{ needs.check-new-releases.outputs.current-stable }}"
+          echo "New release detected: ${{ needs.check-new-releases.outputs.has-new-release }}"
+          
+          echo "Latest build: ${{ needs.test-compatibility.outputs.latest-kernel }}"
+          echo "Stable build: ${{ needs.test-compatibility.outputs.stable-kernel }}"
+          
+          if [ "${{ needs.test-compatibility.outputs.latest-status }}" = "failure" ]; then
+            echo "⚠️  Latest kernel is not compatible with current ZFS"
+            echo "Consider updating ZFS compatibility matrix or waiting for ZFS updates"
+          elif [ "${{ needs.test-compatibility.outputs.latest-status }}" = "success" ]; then
+            echo "✅ Latest kernel is compatible"
+          fi
+
+      - name: Create update issue
+        if: |
+          needs.check-new-releases.outputs.has-new-release == 'true' && 
+          needs.test-compatibility.outputs.latest-status == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `New Kernel Release: ${{ needs.check-new-releases.outputs.latest-release }}`;
+            const body = `
+            ## New Microsoft WSL2 Kernel Available
+            
+            **Latest Microsoft Release:** ${{ needs.check-new-releases.outputs.latest-release }}
+            **Current Stable Version:** ${{ needs.check-new-releases.outputs.current-stable }}
+            **Compatibility Status:** ${{ needs.test-compatibility.outputs.latest-status }}
+            
+            A new Microsoft WSL2 kernel release has been detected, but it's not compatible with the current ZFS version in nixpkgs.
+            
+            ### Next Steps:
+            - [ ] Check if newer ZFS version is available in nixpkgs-unstable
+            - [ ] Update \`supportedKernelVersions\` in \`nix/kernel-version-resolver.nix\`
+            - [ ] Test compatibility manually
+            - [ ] Update \`knownWorkingKernels\` when compatibility is confirmed
+            - [ ] Update stable version once tested
+            
+            ### Build Information:
+            - Latest ZFS: ${{ needs.test-compatibility.outputs.latest-zfs }}
+            - Stable ZFS: ${{ needs.test-compatibility.outputs.stable-zfs }}
+            
+            ### Detected Change:
+            - Previous: ${{ needs.check-new-releases.outputs.current-stable }}
+            - New: ${{ needs.check-new-releases.outputs.latest-release }}
+            `;
+            
+            // Check if issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['kernel-update']
+            });
+            
+            const existingIssue = issues.data.find(issue => 
+              issue.title.includes('${{ needs.check-new-releases.outputs.latest-release }}')
+            );
+            
+            if (!existingIssue) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['kernel-update', 'compatibility', 'automated']
+              });
+              console.log(`Created issue for new kernel release: ${{ needs.check-new-releases.outputs.latest-release }}`);
+            } else {
+              console.log(`Issue already exists for kernel release: ${{ needs.check-new-releases.outputs.latest-release }}`);
+            }
+
+      - name: Create success issue
+        if: |
+          needs.check-new-releases.outputs.has-new-release == 'true' && 
+          needs.test-compatibility.outputs.latest-status == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `✅ New Compatible Kernel: ${{ needs.check-new-releases.outputs.latest-release }}`;
+            const body = `
+            ## New Compatible Microsoft WSL2 Kernel Available
+            
+            **Latest Microsoft Release:** ${{ needs.check-new-releases.outputs.latest-release }}
+            **Current Stable Version:** ${{ needs.check-new-releases.outputs.current-stable }}
+            **Compatibility Status:** ✅ Compatible
+            
+            Great news! A new Microsoft WSL2 kernel release is available and it's compatible with the current ZFS version.
+            
+            ### Next Steps:
+            - [ ] Review the CI build artifacts
+            - [ ] Test the new kernel build
+            - [ ] Consider updating the stable version in \`nix/kernel-version-resolver.nix\`
+            - [ ] Update documentation if needed
+            
+            ### Build Information:
+            - Kernel: ${{ needs.test-compatibility.outputs.latest-kernel }}
+            - ZFS: ${{ needs.test-compatibility.outputs.latest-zfs }}
+            `;
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['kernel-update', 'compatible', 'automated']
+            });
+            console.log(`Created success issue for compatible kernel: ${{ needs.check-new-releases.outputs.latest-release }}`);
+
+  create-releases:
+    name: Create GitHub Releases
+    runs-on: ubuntu-latest
+    if: |
+      (needs.build-stable.result == 'success' || needs.build-latest.result == 'success') &&
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' || 
+       github.event_name == 'schedule' || 
+       github.event_name == 'workflow_dispatch')
+    needs: [check-new-releases, test-compatibility, build-stable, build-latest]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download stable artifacts
+        if: needs.build-stable.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: wsl2-kernel-stable-${{ needs.test-compatibility.outputs.stable-kernel }}
+          path: stable-artifacts/
+
+      - name: Download latest artifacts
+        if: needs.build-latest.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: wsl2-kernel-latest-${{ needs.test-compatibility.outputs.latest-kernel }}
+          path: latest-artifacts/
+
+      - name: Prepare release assets
+        run: |
+          echo "Preparing release assets..."
+          mkdir -p release-assets
+          
+          # Prepare stable artifacts
+          if [ -d "stable-artifacts" ]; then
+            echo "Processing stable artifacts..."
+            cd stable-artifacts
+            for file in *; do
+              if [[ "$file" == bzImage-*.gz ]]; then
+                # Rename bzImage to include version
+                new_name="bzImage-stable-${{ needs.test-compatibility.outputs.stable-kernel }}-$(echo $file | cut -d'-' -f2)"
+                cp "$file" "../release-assets/$new_name"
+              else
+                cp "$file" "../release-assets/stable-$file"
+              fi
+            done
+            cd ..
+          fi
+          
+          # Prepare latest artifacts (if different from stable)
+          if [ -d "latest-artifacts" ] && [ "${{ needs.test-compatibility.outputs.latest-kernel }}" != "${{ needs.test-compatibility.outputs.stable-kernel }}" ]; then
+            echo "Processing latest artifacts..."
+            cd latest-artifacts
+            for file in *; do
+              if [[ "$file" == bzImage-*.gz ]]; then
+                # Rename bzImage to include version
+                new_name="bzImage-latest-${{ needs.test-compatibility.outputs.latest-kernel }}-$(echo $file | cut -d'-' -f2)"
+                cp "$file" "../release-assets/$new_name"
+              else
+                cp "$file" "../release-assets/latest-$file"
+              fi
+            done
+            cd ..
+          fi
+          
+          # Show what we're releasing
+          echo "Release assets:"
+          ls -la release-assets/
+
+      - name: Create/Update Nightly Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            const tag = 'nightly';
+            const releaseName = 'Nightly WSL2 Kernel with ZFS';
+            
+            // Generate release body
+            const stableKernel = '${{ needs.test-compatibility.outputs.stable-kernel }}';
+            const latestKernel = '${{ needs.test-compatibility.outputs.latest-kernel }}';
+            const stableZfs = '${{ needs.test-compatibility.outputs.stable-zfs }}';
+            const latestZfs = '${{ needs.test-compatibility.outputs.latest-zfs }}';
+            const buildDate = new Date().toISOString();
+            
+            let releaseBody = `# WSL2 Kernel with ZFS - Nightly Build
+            
+            **Build Date:** ${buildDate}
+            **Trigger:** ${{ github.event_name }}
+            
+            ## Available Kernels
+            
+            ### Stable Kernel
+            - **Version:** ${stableKernel}
+            - **ZFS Version:** ${stableZfs}
+            - **Status:** ✅ Stable and tested
+            
+            `;
+            
+            if (latestKernel !== stableKernel) {
+              releaseBody += `### Latest Kernel
+            - **Version:** ${latestKernel}
+            - **ZFS Version:** ${latestZfs}
+            - **Status:** ${{ needs.test-compatibility.outputs.latest-status === 'success' && '✅ Compatible' || '❌ Incompatible' }}
+            
+            `;
+            }
+            
+            releaseBody += `## Usage
+            
+            1. Download the appropriate \`bzImage-*.gz\` file for your architecture
+            2. Extract: \`gunzip bzImage-*.gz\`
+            3. Use with WSL2: Place in your WSL2 configuration
+            4. Load ZFS modules using the provided \`zfs.conf\`
+            
+            ## Files
+            
+            - \`bzImage-{stable|latest}-{version}-{arch}.gz\` - Compressed kernel images
+            - \`{stable|latest}-build-info.json\` - Build metadata
+            - \`{stable|latest}-zfs.conf\` - ZFS module loading configuration
+            - \`{stable|latest}-checksums.sha256\` - File checksums
+            
+            ## Notes
+            
+            This is a **nightly/development release** that gets updated automatically.
+            For production use, consider using a specific versioned release.
+            
+            ---
+            *This release is automatically generated by CI*`;
+            
+            try {
+              // Try to get existing release
+              const { data: existingRelease } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag
+              });
+              
+              console.log('Found existing nightly release, updating...');
+              
+              // Delete existing assets
+              for (const asset of existingRelease.assets) {
+                await github.rest.repos.deleteReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  asset_id: asset.id
+                });
+              }
+              
+              // Update the release
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: existingRelease.id,
+                name: releaseName,
+                body: releaseBody,
+                prerelease: true
+              });
+              
+              console.log('Updated existing nightly release');
+              return existingRelease.id;
+              
+            } catch (error) {
+              if (error.status === 404) {
+                console.log('No existing nightly release found, creating new one...');
+                
+                // Create new release
+                const { data: newRelease } = await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tag,
+                  name: releaseName,
+                  body: releaseBody,
+                  prerelease: true
+                });
+                
+                console.log('Created new nightly release');
+                return newRelease.id;
+              } else {
+                throw error;
+              }
+            }
+
+      - name: Upload assets to nightly release
+        run: |
+          echo "Uploading assets to nightly release..."
+          
+          # Get release ID (we'll use the nightly tag to find it)
+          release_id=$(gh api repos/${{ github.repository }}/releases/tags/nightly --jq '.id')
+          
+          # Upload each asset
+          for file in release-assets/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              echo "Uploading $filename..."
+              gh api repos/${{ github.repository }}/releases/$release_id/assets \
+                --method POST \
+                --field name="$filename" \
+                --input "$file" \
+                --header "Content-Type: application/octet-stream"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Versioned Release for New Kernel
+        if: |
+          github.event_name == 'schedule' && 
+          needs.check-new-releases.outputs.has-new-release == 'true' &&
+          needs.test-compatibility.outputs.latest-status == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const latestKernel = '${{ needs.test-compatibility.outputs.latest-kernel }}';
+            const latestZfs = '${{ needs.test-compatibility.outputs.latest-zfs }}';
+            const msftRelease = '${{ needs.check-new-releases.outputs.latest-release }}';
+            
+            const tag = `v${latestKernel}-zfs${latestZfs}`;
+            const releaseName = `WSL2 Kernel ${latestKernel} with ZFS ${latestZfs}`;
+            
+            const releaseBody = `# WSL2 Kernel with ZFS
+            
+            **Microsoft Kernel:** ${msftRelease}
+            **Kernel Version:** ${latestKernel}
+            **ZFS Version:** ${latestZfs}
+            **Build Date:** ${new Date().toISOString()}
+            
+            ## What's New
+            
+            This release includes the latest Microsoft WSL2 kernel (${msftRelease}) with ZFS support.
+            
+            - ✅ **Compatibility Tested:** This kernel version is confirmed compatible with ZFS ${latestZfs}
+            - 🔄 **Automatic Build:** Built and tested by CI
+            - 📦 **Complete Package:** Includes kernel, ZFS modules, and configuration
+            
+            ## Usage
+            
+            1. Download the appropriate \`bzImage-latest-*.gz\` file for your architecture
+            2. Extract: \`gunzip bzImage-latest-*.gz\`
+            3. Configure WSL2 to use the custom kernel
+            4. Load ZFS modules using the provided configuration
+            
+            ## Files
+            
+            - \`bzImage-latest-{version}-{arch}.gz\` - Compressed kernel image
+            - \`latest-build-info.json\` - Detailed build information
+            - \`latest-zfs.conf\` - ZFS module loading configuration
+            - \`latest-checksums.sha256\` - File integrity checksums
+            
+            ## Installation
+            
+            ### WSL2 Configuration
+            
+            1. Extract the kernel: \`gunzip bzImage-latest-*.gz\`
+            2. Place kernel in a accessible location (e.g., \`C:\\wsl\\kernel\`)
+            3. Create/update \`.wslconfig\` in your Windows user directory:
+            
+            \`\`\`ini
+            [wsl2]
+            kernel=C:\\wsl\\kernel\\bzImage-latest-${latestKernel}-amd64
+            \`\`\`
+            
+            4. Restart WSL: \`wsl --shutdown\` then start your distribution
+            
+            ### ZFS Setup
+            
+            \`\`\`bash
+            # Load ZFS modules (as root)
+            modprobe zfs
+            
+            # Verify ZFS is loaded
+            lsmod | grep zfs
+            zfs version
+            \`\`\`
+            
+            ---
+            *Automatically generated from Microsoft WSL2-Linux-Kernel ${msftRelease}*`;
+            
+            try {
+              // Check if this version already exists
+              await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag
+              });
+              
+              console.log(`Release ${tag} already exists, skipping creation`);
+              
+            } catch (error) {
+              if (error.status === 404) {
+                console.log(`Creating new versioned release: ${tag}`);
+                
+                const { data: newRelease } = await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tag,
+                  name: releaseName,
+                  body: releaseBody,
+                  prerelease: false
+                });
+                
+                console.log(`Created versioned release: ${tag}`);
+                
+                // Upload assets to versioned release
+                const fs = require('fs');
+                const path = require('path');
+                
+                // We'll need to upload the latest artifacts
+                // This would be done in a separate step in a real implementation
+                // For now, we'll just log that the release was created
+                console.log(`Versioned release ${tag} created successfully`);
+                
+              } else {
+                throw error;
+              }
+            }
+
+      - name: Upload assets to versioned release
+        if: |
+          github.event_name == 'schedule' && 
+          needs.check-new-releases.outputs.has-new-release == 'true' &&
+          needs.test-compatibility.outputs.latest-status == 'success'
+        run: |
+          echo "Uploading assets to versioned release..."
+          
+          latest_kernel="${{ needs.test-compatibility.outputs.latest-kernel }}"
+          latest_zfs="${{ needs.test-compatibility.outputs.latest-zfs }}"
+          tag="v${latest_kernel}-zfs${latest_zfs}"
+          
+          # Check if release exists and get ID
+          if gh api repos/${{ github.repository }}/releases/tags/$tag >/dev/null 2>&1; then
+            release_id=$(gh api repos/${{ github.repository }}/releases/tags/$tag --jq '.id')
+            
+            # Upload latest artifacts only (since this is for the new kernel)
+            if [ -d "latest-artifacts" ]; then
+              for file in latest-artifacts/*; do
+                if [ -f "$file" ]; then
+                  filename=$(basename "$file")
+                  # Rename to remove 'latest-' prefix for versioned release
+                  clean_name=$(echo "$filename" | sed 's/^latest-//')
+                  echo "Uploading $filename as $clean_name..."
+                  
+                  gh api repos/${{ github.repository }}/releases/$release_id/assets \
+                    --method POST \
+                    --field name="$clean_name" \
+                    --input "$file" \
+                    --header "Content-Type: application/octet-stream"
+                fi
+              done
+            fi
+          else
+            echo "Versioned release $tag not found, skipping asset upload"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
