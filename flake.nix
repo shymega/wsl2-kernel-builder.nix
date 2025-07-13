@@ -44,7 +44,6 @@
             zlib
           ]
           ++ self.checks.${system}.pre-commit-checks.enabledPackages;
-        inputsFrom = allKernels;
       };
     in {
       devShells = {
