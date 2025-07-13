@@ -1,5 +1,4 @@
-{ pkgs, ... }:
-{
+{pkgs, ...}: {
   package = pkgs.treefmt;
   projectRootFile = "flake.nix";
 

@@ -1,7 +1,8 @@
-{ system
-, inputs
-, lib
-, ...
+{
+  system,
+  inputs,
+  lib,
+  ...
 }:
 inputs.git-hooks.lib.${system}.run {
   src = lib.cleanSource ./.;
