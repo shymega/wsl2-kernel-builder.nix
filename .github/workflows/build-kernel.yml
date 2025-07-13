@@ -4,10 +4,6 @@ on:
   schedule:
     # Every 4 weeks on Mondays at 6 AM UTC (28 days)
     - cron: '0 6 */28 * 1'
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:  # Allow manual triggers
 
 env:
@@ -58,11 +54,10 @@ jobs:
   test-compatibility:
     name: Test Kernel/ZFS Compatibility
     runs-on: ubuntu-latest
-    # Run if: manual trigger, push/PR, or if scheduled AND there's a new release
+    # Run if: manual trigger or scheduled
     if: |
-      github.event_name != 'schedule' || 
-      (github.event_name == 'schedule' && needs.check-new-releases.outputs.has-new-release == 'true')
-    needs: check-new-releases
+      github.event_name == 'workflow_dispatch' || 
+      github.event_name == 'schedule'
     outputs:
       latest-kernel: ${{ steps.check-latest.outputs.kernel-version }}
       latest-zfs: ${{ steps.check-latest.outputs.zfs-version }}
@@ -355,7 +350,7 @@ jobs:
     name: Check for Updates
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
-    needs: [check-new-releases, test-compatibility, build-stable]
+    needs: [test-compatibility, build-stable]
     
     steps:
       - name: Checkout repository
@@ -479,10 +474,9 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       (needs.build-stable.result == 'success' || needs.build-latest.result == 'success') &&
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' || 
-       github.event_name == 'schedule' || 
+      (github.event_name == 'schedule' || 
        github.event_name == 'workflow_dispatch')
-    needs: [check-new-releases, test-compatibility, build-stable, build-latest]
+    needs: [test-compatibility, build-stable, build-latest]
     
     steps:
       - name: Checkout repository
