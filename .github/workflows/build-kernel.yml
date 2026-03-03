@@ -164,7 +164,7 @@ jobs:
           cat compatibility-report.md
 
       - name: Upload compatibility report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: compatibility-report
           path: compatibility-report.md
@@ -258,7 +258,7 @@ jobs:
           ls -la
 
       - name: Upload kernel artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wsl2-kernel-stable-${{ needs.test-compatibility.outputs.stable-kernel }}
           path: artifacts/
@@ -341,7 +341,7 @@ jobs:
           ls -la
 
       - name: Upload kernel artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wsl2-kernel-latest-${{ needs.test-compatibility.outputs.latest-kernel }}
           path: artifacts/
@@ -485,14 +485,14 @@ jobs:
 
       - name: Download stable artifacts
         if: needs.build-stable.result == 'success'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: wsl2-kernel-stable-${{ needs.test-compatibility.outputs.stable-kernel }}
           path: stable-artifacts/
 
       - name: Download latest artifacts
         if: needs.build-latest.result == 'success'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: wsl2-kernel-latest-${{ needs.test-compatibility.outputs.latest-kernel }}
           path: latest-artifacts/
