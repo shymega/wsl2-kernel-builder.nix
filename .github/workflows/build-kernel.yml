@@ -379,7 +379,7 @@ jobs:
         if: |
           needs.check-new-releases.outputs.has-new-release == 'true' && 
           needs.test-compatibility.outputs.latest-status == 'failure'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `New Kernel Release: ${{ needs.check-new-releases.outputs.latest-release }}`;
@@ -437,7 +437,7 @@ jobs:
         if: |
           needs.check-new-releases.outputs.has-new-release == 'true' && 
           needs.test-compatibility.outputs.latest-status == 'success'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `✅ New Compatible Kernel: ${{ needs.check-new-releases.outputs.latest-release }}`;
@@ -539,7 +539,7 @@ jobs:
           ls -la release-assets/
 
       - name: Create/Update Nightly Release
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
@@ -680,7 +680,7 @@ jobs:
           github.event_name == 'schedule' && 
           needs.check-new-releases.outputs.has-new-release == 'true' &&
           needs.test-compatibility.outputs.latest-status == 'success'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const latestKernel = '${{ needs.test-compatibility.outputs.latest-kernel }}';
